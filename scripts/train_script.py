@@ -231,7 +231,7 @@ def main():
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=args.epochs - 1, gamma=0.1)
     
     # Training loop
-    best_mae = float('inf')
+    best_mape = float('inf')
     start_epoch = 0
     
     # Resume from checkpoint if specified
@@ -281,8 +281,8 @@ def main():
             print(f'Epoch {epoch} evaluation: MAE={mae:.2f}, MSE={mse:.2f}, MAPE={mape:.2f}%')
             
             # Save best model if current MAE improves
-            if mae < best_mae:
-                best_mae = mae
+            if mape < best_mape:
+                best_mape = mape
                 best_path = os.path.join(args.save_dir, 'checkpoint_best.pth')
                 torch.save({
                     'model': model.state_dict(),
@@ -293,7 +293,7 @@ def main():
                     'mape': mape,
                     'args': args
                 }, best_path)
-                print(f'New best model saved with MAE: {mae:.2f}')
+                print(f'New best model saved with MAPE: {mape:.2f}')
 
     
     # Final evaluation
@@ -303,7 +303,7 @@ def main():
     with open(log_file, 'a') as f:
         f.write(f'Training completed at {datetime.datetime.now()}\n')
         f.write(f'Final evaluation: MAE={final_mae:.2f}, MSE={final_mse:.2f}, MAPE={final_mape:.2f}\n')
-        f.write(f'Best MAE: {best_mae:.2f}\n')
+        f.write(f'Best MAE: {best_mape:.2f}\n')
     
     writer.close()
     print('Training completed.')
