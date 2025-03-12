@@ -123,6 +123,7 @@ def evaluate(model, data_loader, device):
     
     mae_list = []
     mse_list = []
+    mape_list = []  # new list for MAPE
     
     for images, targets in data_loader:
         # Move data to device
@@ -145,18 +146,25 @@ def evaluate(model, data_loader, device):
             pred_mask = scores[i] > threshold
             pred_count = int(pred_mask.sum().item())
             
-            # Calculate metrics
+            # Calculate MAE and MSE
             mae = abs(pred_count - gt_count)
             mse = (pred_count - gt_count) ** 2
             
+            # Calculate MAPE, using epsilon to avoid division by zero.
+            epsilon = 1e-8
+            mape = 100 * abs(pred_count - gt_count) / (gt_count + epsilon)
+            
             mae_list.append(mae)
             mse_list.append(mse)
+            mape_list.append(mape)
     
     # Calculate final metrics
     mae = np.mean(mae_list)
     mse = np.sqrt(np.mean(mse_list))
+    mape = np.mean(mape_list)
     
-    return mae, mse
+    return mae, mse, mape
+
 
 def main():
     # Parse arguments
@@ -249,16 +257,7 @@ def main():
         for k, v in train_stats.items():
             writer.add_scalar(f'train/{k}', v, epoch)
         
-        # Save checkpoint
-        checkpoint_path = os.path.join(args.save_dir, f'checkpoint_{epoch:04d}.pth')
-        torch.save({
-            'model': model.state_dict(),
-            'optimizer': optimizer.state_dict(),
-            'epoch': epoch,
-            'args': args
-        }, checkpoint_path)
-        
-        # Always save latest checkpoint
+        # Save only the latest checkpoint
         latest_path = os.path.join(args.save_dir, 'checkpoint_latest.pth')
         torch.save({
             'model': model.state_dict(),
@@ -269,18 +268,19 @@ def main():
         
         # Evaluate periodically
         if epoch % args.eval_freq == 0 or epoch == args.epochs - 1:
-            mae, mse = evaluate(model, val_loader, device)
+            mae, mse, mape = evaluate(model, val_loader, device)
             
-            # Log metrics
+            # Log evaluation metrics
             writer.add_scalar('val/mae', mae, epoch)
             writer.add_scalar('val/mse', mse, epoch)
+            writer.add_scalar('val/mape', mape, epoch)
             
             with open(log_file, 'a') as f:
-                f.write(f'Epoch {epoch}: MAE={mae:.2f}, MSE={mse:.2f}\n')
+                f.write(f'Epoch {epoch}: MAE={mae:.2f}, MSE={mse:.2f}, MAPE={mape:.2f}%\n')
             
-            print(f'Epoch {epoch} evaluation: MAE={mae:.2f}, MSE={mse:.2f}')
+            print(f'Epoch {epoch} evaluation: MAE={mae:.2f}, MSE={mse:.2f}, MAPE={mape:.2f}%')
             
-            # Save best model
+            # Save best model if current MAE improves
             if mae < best_mae:
                 best_mae = mae
                 best_path = os.path.join(args.save_dir, 'checkpoint_best.pth')
@@ -290,18 +290,19 @@ def main():
                     'epoch': epoch,
                     'mae': mae,
                     'mse': mse,
+                    'mape': mape,
                     'args': args
                 }, best_path)
-                
                 print(f'New best model saved with MAE: {mae:.2f}')
+
     
     # Final evaluation
-    final_mae, final_mse = evaluate(model, val_loader, device)
-    print(f'Final evaluation: MAE={final_mae:.2f}, MSE={final_mse:.2f}')
+    final_mae, final_mse, final_mape = evaluate(model, val_loader, device)
+    print(f'Final evaluation: MAE={final_mae:.2f}, MSE={final_mse:.2f}, MAPE={final_mape:.2f}')
     
     with open(log_file, 'a') as f:
         f.write(f'Training completed at {datetime.datetime.now()}\n')
-        f.write(f'Final evaluation: MAE={final_mae:.2f}, MSE={final_mse:.2f}\n')
+        f.write(f'Final evaluation: MAE={final_mae:.2f}, MSE={final_mse:.2f}, MAPE={final_mape:.2f}\n')
         f.write(f'Best MAE: {best_mae:.2f}\n')
     
     writer.close()
