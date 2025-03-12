@@ -6,7 +6,7 @@ import torchvision.transforms as transforms
 from PIL import Image
 import cv2
 import matplotlib.pyplot as plt
-from modern_point_net import ModernPointNet, build_modern_point_net
+from model.modern_point_net import ModernPointNet, build_modern_point_net
 
 def parse_args():
     """Parse command line arguments"""

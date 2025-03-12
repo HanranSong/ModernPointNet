@@ -11,8 +11,8 @@ import torch.optim as optim
 from tensorboardX import SummaryWriter
 
 # Import our modernized modules
-from modern_point_net import ModernPointNet, PointNetLoss, build_modern_point_net
-from dataset_loader import build_crowd_dataset, collate_fn
+from model.modern_point_net import ModernPointNet, PointNetLoss, build_modern_point_net
+from utils.dataset_loader import build_crowd_dataset, collate_fn
 
 def parse_args():
     """Parse command line arguments"""
@@ -25,7 +25,7 @@ def parse_args():
                         help='Dataset name: SHHA, SHHB, UCF_QNRF, etc.')
     
     # Training parameters
-    parser.add_argument('--batch_size', type=int, default=8,
+    parser.add_argument('--batch_size', type=int, default=16,
                         help='Training batch size')
     parser.add_argument('--epochs', type=int, default=3500,
                         help='Number of training epochs')
@@ -55,7 +55,7 @@ def parse_args():
                         help='Directory to save checkpoints')
     parser.add_argument('--resume', type=str, default=None,
                         help='Path to checkpoint to resume from')
-    parser.add_argument('--seed', type=int, default=42,
+    parser.add_argument('--seed', type=int, default=3407,
                         help='Random seed for reproducibility')
     parser.add_argument('--gpu_id', type=int, default=0,
                         help='GPU ID to use')

@@ -4,31 +4,64 @@ import torch.nn.functional as F
 import torchvision
 import numpy as np
 
-class FeatureExtractor(nn.Module):
-    """
-    Feature extraction backbone based on VGG16 with batch normalization.
-    Returns multi-scale features from different VGG blocks.
-    """
-    def __init__(self, pretrained=True):
-        super(FeatureExtractor, self).__init__()
-        # Load pretrained VGG16 with batch normalization
-        vgg = torchvision.models.vgg16_bn(pretrained=pretrained)
-        features = list(vgg.features.children())
+import torch.nn as nn
+import torchvision.models as models
+
+# class FeatureExtractor(nn.Module):
+#     """
+#     Feature extraction backbone based on VGG16 with batch normalization.
+#     Returns multi-scale features from different VGG blocks.
+#     """
+#     def __init__(self, pretrained=True):
+#         super(FeatureExtractor, self).__init__()
+#         # Load pretrained VGG16 with batch normalization
+#         vgg = torchvision.models.vgg16_bn(pretrained=pretrained)
+#         features = list(vgg.features.children())
         
-        # Extract features at different scales
-        self.block1 = nn.Sequential(*features[:13])    # 1/4 scale
-        self.block2 = nn.Sequential(*features[13:23])  # 1/8 scale
-        self.block3 = nn.Sequential(*features[23:33])  # 1/16 scale
-        self.block4 = nn.Sequential(*features[33:43])  # 1/32 scale
+#         # Extract features at different scales
+#         self.block1 = nn.Sequential(*features[:13])    # 1/4 scale
+#         self.block2 = nn.Sequential(*features[13:23])  # 1/8 scale
+#         self.block3 = nn.Sequential(*features[23:33])  # 1/16 scale
+#         self.block4 = nn.Sequential(*features[33:43])  # 1/32 scale
         
+#     def forward(self, x):
+#         # Extract features at different scales
+#         feat1 = self.block1(x)         # 1/4 scale
+#         feat2 = self.block2(feat1)     # 1/8 scale
+#         feat3 = self.block3(feat2)     # 1/16 scale
+#         feat4 = self.block4(feat3)     # 1/32 scale
+        
+#         return [feat1, feat2, feat3, feat4]
+
+class ResNetFeatureExtractor(nn.Module):
+    def __init__(self, backbone='resnet50', pretrained=True):
+        super(ResNetFeatureExtractor, self).__init__()
+        if backbone == 'resnet50':
+            resnet = models.resnet50(pretrained=pretrained)
+        elif backbone == 'resnet101':
+            resnet = models.resnet101(pretrained=pretrained)
+        else:
+            raise ValueError("Unsupported backbone type")
+        # Remove the average pooling and fc layers by creating a sequential module
+        self.layer0 = nn.Sequential(
+            resnet.conv1, 
+            resnet.bn1, 
+            resnet.relu, 
+            resnet.maxpool
+        )
+        self.layer1 = resnet.layer1  # output channels: 256
+        self.layer2 = resnet.layer2  # output channels: 512
+        self.layer3 = resnet.layer3  # output channels: 1024
+        self.layer4 = resnet.layer4  # output channels: 2048
+
     def forward(self, x):
-        # Extract features at different scales
-        feat1 = self.block1(x)         # 1/4 scale
-        feat2 = self.block2(feat1)     # 1/8 scale
-        feat3 = self.block3(feat2)     # 1/16 scale
-        feat4 = self.block4(feat3)     # 1/32 scale
-        
+        x = self.layer0(x)
+        feat1 = self.layer1(x)  # 1/4 resolution
+        feat2 = self.layer2(feat1)  # 1/8 resolution
+        feat3 = self.layer3(feat2)  # 1/16 resolution
+        feat4 = self.layer4(feat3)  # 1/32 resolution
         return [feat1, feat2, feat3, feat4]
+
 
 class FeaturePyramidNetwork(nn.Module):
     """
@@ -229,60 +262,35 @@ class AnchorPoints(nn.Module):
         return points_tensor
 
 class ModernPointNet(nn.Module):
-    """
-    Modern implementation of P2PNet for crowd counting.
-    Simplified architecture with clear components and enhanced feature extraction.
-    """
-    def __init__(self, num_classes=1, row=2, line=2, feature_size=256):
+    def __init__(self, backbone='resnet50', num_classes=1, row=2, line=2, feature_size=256):
         super(ModernPointNet, self).__init__()
-        
-        # Feature extraction and fusion
-        self.backbone = FeatureExtractor(pretrained=True)
-        # Changed channel configuration to match VGG16 feature maps
-        self.fpn = FeaturePyramidNetwork([64, 256, 512, 512], feature_size)
-        
-        # Number of anchor points per grid cell
+        # Use the new ResNet-based feature extractor
+        self.backbone = ResNetFeatureExtractor(backbone=backbone, pretrained=True)
+        # Update FPN input channels for ResNet
+        self.fpn = FeaturePyramidNetwork(feature_channels=[256, 512, 1024, 2048],
+                                          feature_size=feature_size)
+        # The rest of your architecture remains the same...
         self.point_count = row * line
-        
-        # Point prediction and classification heads
         self.point_head = PointHead(feature_size, self.point_count, feature_size)
         self.class_head = ClassificationHead(feature_size, self.point_count, num_classes + 1, feature_size)
-        
-        # Generate anchor points
         self.anchor_points = AnchorPoints(pyramid_levels=[3], row=row, line=line)
-        
-        # Optional attention mechanism for better feature focus
         self.attention = SpatialAttention(feature_size)
         
     def forward(self, x):
-        """Forward pass through the network"""
-        # Extract multi-scale features
         features = self.backbone(x)
-        
-        # Build feature pyramid
         pyramid_features = self.fpn(features)
-        
-        # Apply attention to mid-level features
         enhanced_features = self.attention(pyramid_features[1])
-        
-        # Generate predictions
-        point_offsets = self.point_head(enhanced_features) * 100  # Scale factor for better training
+        point_offsets = self.point_head(enhanced_features) * 100  # scale factor
         class_scores = self.class_head(enhanced_features)
-        
-        # Get anchor points and repeat for batch
         batch_size = x.shape[0]
         anchors = self.anchor_points(x).repeat(batch_size, 1, 1)
-        
-        # Add offsets to anchors to get final point predictions
         predicted_points = point_offsets + anchors
-        
-        # Return results
         outputs = {
             'pred_logits': class_scores,  
             'pred_points': predicted_points
         }
-        
         return outputs
+
 
 class SpatialAttention(nn.Module):
     """
