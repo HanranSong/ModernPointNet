@@ -27,7 +27,7 @@ def parse_args():
     # Training parameters
     parser.add_argument('--batch_size', type=int, default=16,
                         help='Training batch size')
-    parser.add_argument('--epochs', type=int, default=1000,
+    parser.add_argument('--epochs', type=int, default=300,
                         help='Number of training epochs')
     parser.add_argument('--lr', type=float, default=1e-4,
                         help='Learning rate')
@@ -76,8 +76,6 @@ def train_one_epoch(model, criterion, data_loader, optimizer, device, epoch):
     """Train for one epoch"""
     model.train()
     running_loss = 0.0
-    running_loss_ce = 0.0
-    running_loss_points = 0.0
     
     start_time = time.time()
     
@@ -98,23 +96,16 @@ def train_one_epoch(model, criterion, data_loader, optimizer, device, epoch):
         loss.backward()
         optimizer.step()
         
-        # Update running losses
         running_loss += loss.item()
         
-        # Print progress
+        # Print progress every 10 iterations
         if i % 10 == 0:
             batch_time = time.time() - start_time
-            print(f'Epoch: [{epoch}][{i}/{len(data_loader)}] '
-                  f'Loss: {loss.item():.4f} '
-                  f'Time: {batch_time:.2f}s')
+            print(f'Epoch: [{epoch}][{i}/{len(data_loader)}] Loss: {loss.item():.4f} Time: {batch_time:.2f}s')
             start_time = time.time()
     
-    # Calculate average losses
     avg_loss = running_loss / len(data_loader)
-    
-    return {
-        'loss': avg_loss,
-    }
+    return {'loss': avg_loss}
 
 @torch.no_grad()
 def evaluate(model, data_loader, device):
@@ -126,31 +117,20 @@ def evaluate(model, data_loader, device):
     mape_list = []  # new list for MAPE
     
     for images, targets in data_loader:
-        # Move data to device
         images = images.to(device)
-        
-        # Forward pass
         outputs = model(images)
         
-        # Get predictions
         scores = torch.softmax(outputs['pred_logits'], dim=-1)[:, :, 1]
         pred_points = outputs['pred_points']
         
-        # Process each image in the batch
         for i in range(images.shape[0]):
-            # Get ground truth count
             gt_count = len(targets[i][0]['point'])
-            
-            # Apply confidence threshold
             threshold = 0.5
             pred_mask = scores[i] > threshold
             pred_count = int(pred_mask.sum().item())
             
-            # Calculate MAE and MSE
             mae = abs(pred_count - gt_count)
             mse = (pred_count - gt_count) ** 2
-            
-            # Calculate MAPE, using epsilon to avoid division by zero.
             epsilon = 1e-8
             mape = 100 * abs(pred_count - gt_count) / (gt_count + epsilon)
             
@@ -158,13 +138,11 @@ def evaluate(model, data_loader, device):
             mse_list.append(mse)
             mape_list.append(mape)
     
-    # Calculate final metrics
     mae = np.mean(mae_list)
     mse = np.sqrt(np.mean(mse_list))
     mape = np.mean(mape_list)
     
     return mae, mse, mape
-
 
 def main():
     # Parse arguments
@@ -190,12 +168,11 @@ def main():
     # Initialize tensorboard
     writer = SummaryWriter(args.log_dir)
     
-    # Create datasets
+    # Create datasets and loaders
     train_dataset = build_crowd_dataset(args.data_root, args.dataset, train=True)
     val_dataset = build_crowd_dataset(args.data_root, args.dataset, train=False)
     
-    # Create data loaders
-    train_loader = DataLoader(
+    train_loader = torch.utils.data.DataLoader(
         train_dataset,
         batch_size=args.batch_size,
         shuffle=True,
@@ -205,7 +182,7 @@ def main():
         drop_last=True
     )
     
-    val_loader = DataLoader(
+    val_loader = torch.utils.data.DataLoader(
         val_dataset,
         batch_size=1,
         shuffle=False,
@@ -214,11 +191,11 @@ def main():
         pin_memory=True
     )
     
-    # Build model and criterion
+    # Build model and loss
     weight_dict = {'loss_ce': 1.0, 'loss_points': args.point_loss_coef}
-    model, criterion = build_modern_point_net(pretrained_weights=args.resume, num_classes=1)
+    model, criterion = build_modern_point_net(pretrained_weights=None, num_classes=1)
     
-    # Move to device
+    # Move model and criterion to device
     model = model.to(device)
     criterion = criterion.to(device)
     
@@ -230,34 +207,41 @@ def main():
     optimizer = optim.AdamW(params, lr=args.lr, weight_decay=args.weight_decay)
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=args.epochs - 1, gamma=0.1)
     
-    # Training loop
+    # Initialize training epoch and best metric
     best_mape = float('inf')
     start_epoch = 0
     
-    # Resume from checkpoint if specified
+    # ----- Continue Training / Resume from Checkpoint -----
+    # If --resume is provided or a latest checkpoint exists, load it.
+    checkpoint_path = None
     if args.resume is not None and os.path.exists(args.resume):
-        print(f'Loading checkpoint: {args.resume}')
-        checkpoint = torch.load(args.resume, map_location='cpu')
+        checkpoint_path = args.resume
+    else:
+        latest_ckpt = os.path.join(args.save_dir, 'checkpoint_latest.pth')
+        if os.path.exists(latest_ckpt):
+            checkpoint_path = latest_ckpt
+            print(f'Found latest checkpoint at {latest_ckpt}, resuming training...')
+    
+    if checkpoint_path is not None:
+        print(f'Loading checkpoint: {checkpoint_path}')
+        checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
         model.load_state_dict(checkpoint['model'])
-        
         if 'optimizer' in checkpoint and 'epoch' in checkpoint:
             optimizer.load_state_dict(checkpoint['optimizer'])
             start_epoch = checkpoint['epoch'] + 1
             print(f'Resuming from epoch {start_epoch}')
+    # -------------------------------------------------------
     
     print('Starting training...')
     for epoch in range(start_epoch, args.epochs):
-        # Train for one epoch
         train_stats = train_one_epoch(model, criterion, train_loader, optimizer, device, epoch)
-        
-        # Update learning rate
         scheduler.step()
         
         # Log training statistics
         for k, v in train_stats.items():
             writer.add_scalar(f'train/{k}', v, epoch)
         
-        # Save only the latest checkpoint
+        # Save latest checkpoint after every epoch
         latest_path = os.path.join(args.save_dir, 'checkpoint_latest.pth')
         torch.save({
             'model': model.state_dict(),
@@ -266,11 +250,9 @@ def main():
             'args': args
         }, latest_path)
         
-        # Evaluate periodically
+        # Periodic evaluation
         if epoch % args.eval_freq == 0 or epoch == args.epochs - 1:
             mae, mse, mape = evaluate(model, val_loader, device)
-            
-            # Log evaluation metrics
             writer.add_scalar('val/mae', mae, epoch)
             writer.add_scalar('val/mse', mse, epoch)
             writer.add_scalar('val/mape', mape, epoch)
@@ -280,7 +262,7 @@ def main():
             
             print(f'Epoch {epoch} evaluation: MAE={mae:.2f}, MSE={mse:.2f}, MAPE={mape:.2f}%')
             
-            # Save best model if current MAE improves
+            # Save best model based on MAPE
             if mape < best_mape:
                 best_mape = mape
                 best_path = os.path.join(args.save_dir, 'checkpoint_best.pth')
@@ -294,16 +276,14 @@ def main():
                     'args': args
                 }, best_path)
                 print(f'New best model saved with MAPE: {mape:.2f}')
-
     
-    # Final evaluation
     final_mae, final_mse, final_mape = evaluate(model, val_loader, device)
     print(f'Final evaluation: MAE={final_mae:.2f}, MSE={final_mse:.2f}, MAPE={final_mape:.2f}')
     
     with open(log_file, 'a') as f:
         f.write(f'Training completed at {datetime.datetime.now()}\n')
         f.write(f'Final evaluation: MAE={final_mae:.2f}, MSE={final_mse:.2f}, MAPE={final_mape:.2f}\n')
-        f.write(f'Best MAE: {best_mape:.2f}\n')
+        f.write(f'Best MAPE: {best_mape:.2f}\n')
     
     writer.close()
     print('Training completed.')

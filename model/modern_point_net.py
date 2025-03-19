@@ -4,6 +4,8 @@ import torch.nn.functional as F
 import torchvision
 import numpy as np
 
+from torchvision.models import VGG16_BN_Weights
+
 class FeatureExtractor(nn.Module):
     """
     Feature extraction backbone based on VGG16 with batch normalization.
@@ -12,7 +14,8 @@ class FeatureExtractor(nn.Module):
     def __init__(self, pretrained=True):
         super(FeatureExtractor, self).__init__()
         # Load pretrained VGG16 with batch normalization
-        vgg = torchvision.models.vgg16_bn(pretrained=pretrained)
+        # vgg = torchvision.models.vgg16_bn(pretrained=pretrained)
+        vgg = torchvision.models.vgg16_bn(weights=VGG16_BN_Weights.DEFAULT)
         features = list(vgg.features.children())
         
         # Extract features at different scales
@@ -253,6 +256,7 @@ class ModernPointNet(nn.Module):
         
         # Optional attention mechanism for better feature focus
         self.attention = SpatialAttention(feature_size)
+        # self.attention = CBAMAttention(feature_size)
         
     def forward(self, x):
         """Forward pass through the network"""
@@ -302,11 +306,55 @@ class SpatialAttention(nn.Module):
         
         # Apply attention
         return x * attn + x  # Residual connection
+    
+class CBAMAttention(nn.Module):
+    """
+    An improved attention module integrating both channel and spatial attention.
+    Inspired by CBAM, this module first applies channel attention to recalibrate
+    the feature map and then applies spatial attention to emphasize informative regions.
+    A residual connection is added to ease gradient flow.
+    """
+    def __init__(self, in_channels, reduction_ratio=16, kernel_size=7):
+        super(CBAMAttention, self).__init__()
+        # Channel Attention Module
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+        self.mlp = nn.Sequential(
+            nn.Conv2d(in_channels, in_channels // reduction_ratio, kernel_size=1, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels // reduction_ratio, in_channels, kernel_size=1, bias=False)
+        )
+        self.sigmoid_channel = nn.Sigmoid()
+        
+        # Spatial Attention Module
+        self.conv_spatial = nn.Conv2d(2, 1, kernel_size=kernel_size, padding=kernel_size // 2, bias=False)
+        self.sigmoid_spatial = nn.Sigmoid()
+
+    def forward(self, x):
+        # Channel Attention: aggregate spatial information via average and max pooling,
+        # pass through shared MLP, then combine.
+        avg_out = self.mlp(self.avg_pool(x))
+        max_out = self.mlp(self.max_pool(x))
+        channel_attn = self.sigmoid_channel(avg_out + max_out)
+        x_channel = x * channel_attn
+
+        # Spatial Attention: compute spatial attention by concatenating average and max along channel dim,
+        # convolve, and then apply sigmoid.
+        avg_out_spatial = torch.mean(x_channel, dim=1, keepdim=True)
+        max_out_spatial, _ = torch.max(x_channel, dim=1, keepdim=True)
+        spatial_attn = torch.cat([avg_out_spatial, max_out_spatial], dim=1)
+        spatial_attn = self.conv_spatial(spatial_attn)
+        spatial_attn = self.sigmoid_spatial(spatial_attn)
+        
+        # Apply spatial attention and add a residual connection.
+        out = x_channel * spatial_attn
+        return out + x
 
 class HungarianMatcher(nn.Module):
     """
-    Performs bipartite matching between predictions and ground truth using Hungarian algorithm.
-    Simplified implementation with clear cost calculation.
+    Performs bipartite matching between predictions and ground truth using the Hungarian algorithm.
+    This revised implementation computes matching for each sample individually to avoid constructing
+    a huge cost matrix across the entire batch.
     """
     def __init__(self, cost_class=1.0, cost_point=1.0):
         super(HungarianMatcher, self).__init__()
@@ -315,44 +363,43 @@ class HungarianMatcher(nn.Module):
         
     @torch.no_grad()
     def forward(self, outputs, targets):
-        """Match predictions to ground truth labels"""
+        """Match predictions to ground truth labels for each sample in the batch."""
         bs, num_queries = outputs["pred_logits"].shape[:2]
-        
-        # Compute classification cost
-        out_prob = outputs["pred_logits"].flatten(0, 1).softmax(-1)
-        tgt_ids = torch.cat([v["labels"] for v in targets])
-        cost_class = -out_prob[:, tgt_ids]
-        
-        # Compute point distance cost
-        out_points = outputs["pred_points"].flatten(0, 1)
-        tgt_points = torch.cat([v["point"] for v in targets])
-        cost_point = torch.cdist(out_points, tgt_points, p=2)
-        
-        # Combine costs
-        C = self.cost_point * cost_point + self.cost_class * cost_class
-        C = C.view(bs, num_queries, -1).cpu()
-        
-        # Split costs by target and run Hungarian algorithm
-        sizes = [len(v["point"]) for v in targets]
         indices = []
-        
-        # For each image in the batch
-        start_idx = 0
-        for i, size in enumerate(sizes):
-            if size > 0:
-                # Extract cost matrix for this image
-                cost_matrix = C[i, :, start_idx:start_idx + size]
-                # Run Hungarian algorithm (linear_sum_assignment)
-                from scipy.optimize import linear_sum_assignment
-                pred_idx, gt_idx = linear_sum_assignment(cost_matrix.numpy())
-                indices.append((torch.as_tensor(pred_idx, dtype=torch.int64), 
-                               torch.as_tensor(gt_idx, dtype=torch.int64)))
-            else:
-                indices.append((torch.tensor([], dtype=torch.int64), 
-                               torch.tensor([], dtype=torch.int64)))
-            start_idx += size
+        # Process each sample independently
+        for i in range(bs):
+            # Get predictions for sample i
+            pred_logits = outputs["pred_logits"][i]  # (num_queries, num_classes)
+            out_prob = pred_logits.softmax(-1)         # (num_queries, num_classes)
+            out_points = outputs["pred_points"][i]       # (num_queries, 2)
             
+            # Get target dictionary for the sample
+            # If the target is wrapped in a list, extract the first element.
+            tgt = targets[i]
+            if isinstance(tgt, list):
+                tgt = tgt[0]
+            
+            gt_labels = tgt["labels"]  # (num_points,)
+            gt_points = tgt["point"]   # (num_points, 2)
+            
+            # Compute classification cost: negative probabilities for the target classes
+            # Resulting shape: (num_queries, num_points)
+            cost_class = -out_prob[:, gt_labels]
+            
+            # Compute point regression cost using Euclidean distance
+            cost_point = torch.cdist(out_points, gt_points, p=2)
+            
+            # Combine the two costs
+            C = self.cost_point * cost_point + self.cost_class * cost_class
+            C_cpu = C.cpu().detach().numpy()
+            
+            # Compute optimal assignment for the current sample using Hungarian algorithm
+            from scipy.optimize import linear_sum_assignment
+            row_ind, col_ind = linear_sum_assignment(C_cpu)
+            indices.append((torch.as_tensor(row_ind, dtype=torch.int64),
+                            torch.as_tensor(col_ind, dtype=torch.int64)))
         return indices
+
 
 class PointNetLoss(nn.Module):
     """
