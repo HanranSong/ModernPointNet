@@ -310,63 +310,53 @@ class AnchorPoints(nn.Module):
         return points_tensor
 
 class ModernPointNet(nn.Module):
-    """
-    Modern implementation of P2PNet for crowd counting.
-    Simplified architecture with clear components and enhanced feature extraction.
-    """
-    def __init__(self, num_classes=1, row=2, line=2, feature_size=512):  # feature_size=256
+    def __init__(self, num_classes=1, row=2, line=2, feature_size=512):
         super(ModernPointNet, self).__init__()
-        
-        # Feature extraction and fusion
         self.backbone = FeatureExtractor(pretrained=True)
-        # Changed channel configuration to match VGG16 feature maps
-        # self.fpn = FeaturePyramidNetwork([64, 256, 512, 512], feature_size)
-        # Update FPN channels to match ResNet-50 outputs: [256, 512, 1024, 2048]
         self.fpn = FeaturePyramidNetwork([256, 512, 1024, 2048], feature_size)
-        
-        # Number of anchor points per grid cell
         self.point_count = row * line
-        
-        # Point prediction and classification heads
         self.point_head = PointHead(feature_size, self.point_count, feature_size)
         self.class_head = ClassificationHead(feature_size, self.point_count, num_classes + 1, feature_size)
+        self.anchor_points = AnchorPoints(pyramid_levels=[4], row=row, line=line)
         
-        # Generate anchor points
-        self.anchor_points = AnchorPoints(pyramid_levels=[4], row=row, line=line)  # 3 for VGG16
+        # Instantiate your attention module (e.g. CBAM or SpatialAttention)
+        self.attention = CBAMAttention(feature_size)
         
-        # Optional attention mechanism for better feature focus
-        self.attention = SpatialAttention(feature_size)
-        # self.attention = CBAMAttention(feature_size)
-        
+        # Instantiate the multi-scale fusion module.
+        # Here we assume both scales output features with `feature_size` channels.
+        self.multi_scale_fusion = MultiScaleAttentionFusion([feature_size, feature_size], feature_size)
+
     def forward(self, x):
-        """Forward pass through the network"""
         # Extract multi-scale features
         features = self.backbone(x)
-        
-        # Build feature pyramid
         pyramid_features = self.fpn(features)
         
-        # Apply attention to mid-level features
+        # Apply attention to the chosen pyramid level (p4 in this case)
         enhanced_features = self.attention(pyramid_features[1])
         
-        # Generate predictions
-        point_offsets = self.point_head(enhanced_features) * 100  # Scale factor for better training
+        # Generate predictions from enhanced features
+        point_offsets = self.point_head(enhanced_features) * 100  # Scale factor for training
         class_scores = self.class_head(enhanced_features)
         
-        # Get anchor points and repeat for batch
-        batch_size = x.shape[0]
-        anchors = self.anchor_points(x).repeat(batch_size, 1, 1)
+        # Determine the spatial size of enhanced_features
+        _, _, h, w = enhanced_features.shape
+        # Create a dummy tensor with the expected input size that corresponds to these features.
+        # For example, if the downsampling factor is 16, then the dummy image size is (h*16, w*16).
+        dummy = torch.zeros(x.shape[0], 3, h * 16, w * 16, device=x.device)
+        # Generate anchors from this dummy tensor.
+        anchors = self.anchor_points(dummy).repeat(x.shape[0], 1, 1)
         
-        # Add offsets to anchors to get final point predictions
+        # Now, the predicted point offsets and the anchors have matching numbers.
         predicted_points = point_offsets + anchors
         
-        # Return results
         outputs = {
             'pred_logits': class_scores,  
             'pred_points': predicted_points
         }
         
         return outputs
+
+
 
 class SpatialAttention(nn.Module):
     """
@@ -429,6 +419,26 @@ class CBAMAttention(nn.Module):
         # Apply spatial attention and add a residual connection.
         out = x_channel * spatial_attn
         return out + x
+
+class MultiScaleAttentionFusion(nn.Module):
+    def __init__(self, in_channels_list, out_channels):
+        super(MultiScaleAttentionFusion, self).__init__()
+        # in_channels_list: list of channel dimensions for each attention output
+        # We fuse by concatenation and then use a 1x1 conv to reduce dimensions.
+        self.fuse_conv = nn.Conv2d(sum(in_channels_list), out_channels, kernel_size=1)
+
+    def forward(self, attn_features):
+        # Assume attn_features is a list of attention outputs (e.g., from p3 and p4)
+        # Resize all features to the resolution of the first feature map.
+        target_size = attn_features[0].shape[2:]
+        resized = [feat if feat.shape[2:] == target_size 
+                   else F.interpolate(feat, size=target_size, mode='nearest')
+                   for feat in attn_features]
+        # Concatenate along the channel dimension.
+        fused = torch.cat(resized, dim=1)
+        # Fuse to the desired number of channels.
+        fused = self.fuse_conv(fused)
+        return fused
 
 class HungarianMatcher(nn.Module):
     """
