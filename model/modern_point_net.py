@@ -4,46 +4,124 @@ import torch.nn.functional as F
 import torchvision
 import numpy as np
 
-from torchvision.models import VGG16_BN_Weights
+from torchvision.models import VGG16_BN_Weights, ResNet101_Weights
 
+# # VGG16
+# class FeatureExtractor(nn.Module):
+#     """
+#     Feature extraction backbone based on VGG16 with batch normalization.
+#     Returns multi-scale features from different VGG blocks.
+#     """
+#     def __init__(self, pretrained=True):
+#         super(FeatureExtractor, self).__init__()
+#         # Load pretrained VGG16 with batch normalization
+#         # vgg = torchvision.models.vgg16_bn(pretrained=pretrained)
+#         vgg = torchvision.models.vgg16_bn(weights=VGG16_BN_Weights.DEFAULT)
+#         features = list(vgg.features.children())
+        
+#         # Extract features at different scales
+#         self.block1 = nn.Sequential(*features[:13])    # 1/4 scale
+#         self.block2 = nn.Sequential(*features[13:23])  # 1/8 scale
+#         self.block3 = nn.Sequential(*features[23:33])  # 1/16 scale
+#         self.block4 = nn.Sequential(*features[33:43])  # 1/32 scale
+        
+#     def forward(self, x):
+#         # Extract features at different scales
+#         feat1 = self.block1(x)         # 1/4 scale
+#         feat2 = self.block2(feat1)     # 1/8 scale
+#         feat3 = self.block3(feat2)     # 1/16 scale
+#         feat4 = self.block4(feat3)     # 1/32 scale
+        
+#         return [feat1, feat2, feat3, feat4]
+
+# ResNet50
 class FeatureExtractor(nn.Module):
     """
-    Feature extraction backbone based on VGG16 with batch normalization.
-    Returns multi-scale features from different VGG blocks.
+    Feature extraction backbone based on ResNet-50.
+    Extracts multi-scale features from different ResNet layers.
     """
     def __init__(self, pretrained=True):
         super(FeatureExtractor, self).__init__()
-        # Load pretrained VGG16 with batch normalization
-        # vgg = torchvision.models.vgg16_bn(pretrained=pretrained)
-        vgg = torchvision.models.vgg16_bn(weights=VGG16_BN_Weights.DEFAULT)
-        features = list(vgg.features.children())
-        
-        # Extract features at different scales
-        self.block1 = nn.Sequential(*features[:13])    # 1/4 scale
-        self.block2 = nn.Sequential(*features[13:23])  # 1/8 scale
-        self.block3 = nn.Sequential(*features[23:33])  # 1/16 scale
-        self.block4 = nn.Sequential(*features[33:43])  # 1/32 scale
-        
+        # Load pretrained ResNet-50; if pretrained is False, no weights are loaded.
+        resnet = torchvision.models.resnet101(weights=ResNet101_Weights.DEFAULT if pretrained else None)
+        # The initial block (conv, bn, relu, maxpool)
+        self.layer0 = nn.Sequential(
+            resnet.conv1,
+            resnet.bn1,
+            resnet.relu,
+            resnet.maxpool
+        )
+        # Use the four main layers as feature extractors.
+        self.layer1 = resnet.layer1  # Output channels: 256, 1/4 scale
+        self.layer2 = resnet.layer2  # Output channels: 512, 1/8 scale
+        self.layer3 = resnet.layer3  # Output channels: 1024, 1/16 scale
+        self.layer4 = resnet.layer4  # Output channels: 2048, 1/32 scale
+
     def forward(self, x):
-        # Extract features at different scales
-        feat1 = self.block1(x)         # 1/4 scale
-        feat2 = self.block2(feat1)     # 1/8 scale
-        feat3 = self.block3(feat2)     # 1/16 scale
-        feat4 = self.block4(feat3)     # 1/32 scale
-        
+        x = self.layer0(x)
+        feat1 = self.layer1(x)   # 1/4 scale
+        feat2 = self.layer2(feat1)  # 1/8 scale
+        feat3 = self.layer3(feat2)  # 1/16 scale
+        feat4 = self.layer4(feat3)  # 1/32 scale
         return [feat1, feat2, feat3, feat4]
 
+# # VGG16
+# class FeaturePyramidNetwork(nn.Module):
+#     """
+#     Feature Pyramid Network for multi-scale feature fusion.
+#     Enhanced with residual connections for better gradient flow.
+#     """
+#     def __init__(self, feature_channels=[64, 128, 256, 512], feature_size=512):
+#         super(FeaturePyramidNetwork, self).__init__()
+        
+#         # Project input features to the same dimension
+#         self.p5_conv = nn.Conv2d(feature_channels[3], feature_size, kernel_size=1)
+#         self.p4_conv = nn.Conv2d(feature_channels[2], feature_size, kernel_size=1)  # Changed from [2] to [3]
+#         self.p3_conv = nn.Conv2d(feature_channels[1], feature_size, kernel_size=1)
+        
+#         # Smooth the upsampled features
+#         self.p5_smooth = nn.Conv2d(feature_size, feature_size, kernel_size=3, padding=1)
+#         self.p4_smooth = nn.Conv2d(feature_size, feature_size, kernel_size=3, padding=1)
+#         self.p3_smooth = nn.Conv2d(feature_size, feature_size, kernel_size=3, padding=1)
+        
+#         # Residual blocks for better feature representation
+#         self.p5_residual = ResidualBlock(feature_size)
+#         self.p4_residual = ResidualBlock(feature_size)
+#         self.p3_residual = ResidualBlock(feature_size)
+        
+#     def forward(self, features):
+#         c2, c3, c4, c5 = features
+        
+#         # Top-down pathway with residual connections
+#         p5 = self.p5_conv(c5)  # Use p5_conv for c5
+#         p5 = self.p5_residual(p5)
+        
+#         p4 = self.p4_conv(c4)  # FIXED: Use p4_conv for c4
+#         p4_up = F.interpolate(p5, size=p4.shape[2:], mode='nearest')
+#         p4 = p4 + p4_up
+#         p4 = self.p4_smooth(p4)
+#         p4 = self.p4_residual(p4)
+        
+#         p3 = self.p3_conv(c3)  # Use p3_conv for c3
+#         p3_up = F.interpolate(p4, size=p3.shape[2:], mode='nearest')
+#         p3 = p3 + p3_up
+#         p3 = self.p3_smooth(p3)
+#         p3 = self.p3_residual(p3)
+        
+#         return [p3, p4, p5]
+
+# ResNet50
 class FeaturePyramidNetwork(nn.Module):
     """
     Feature Pyramid Network for multi-scale feature fusion.
     Enhanced with residual connections for better gradient flow.
     """
-    def __init__(self, feature_channels=[64, 128, 256, 512], feature_size=512):
+    def __init__(self, feature_channels=[256, 512, 1024, 2048], feature_size=512):
         super(FeaturePyramidNetwork, self).__init__()
         
         # Project input features to the same dimension
         self.p5_conv = nn.Conv2d(feature_channels[3], feature_size, kernel_size=1)
-        self.p4_conv = nn.Conv2d(feature_channels[2], feature_size, kernel_size=1)  # Changed from [2] to [3]
+        self.p4_conv = nn.Conv2d(feature_channels[2], feature_size, kernel_size=1)
         self.p3_conv = nn.Conv2d(feature_channels[1], feature_size, kernel_size=1)
         
         # Smooth the upsampled features
@@ -60,16 +138,16 @@ class FeaturePyramidNetwork(nn.Module):
         c2, c3, c4, c5 = features
         
         # Top-down pathway with residual connections
-        p5 = self.p5_conv(c5)  # Use p5_conv for c5
+        p5 = self.p5_conv(c5)
         p5 = self.p5_residual(p5)
         
-        p4 = self.p4_conv(c4)  # FIXED: Use p4_conv for c4
+        p4 = self.p4_conv(c4)
         p4_up = F.interpolate(p5, size=p4.shape[2:], mode='nearest')
         p4 = p4 + p4_up
         p4 = self.p4_smooth(p4)
         p4 = self.p4_residual(p4)
         
-        p3 = self.p3_conv(c3)  # Use p3_conv for c3
+        p3 = self.p3_conv(c3)
         p3_up = F.interpolate(p4, size=p3.shape[2:], mode='nearest')
         p3 = p3 + p3_up
         p3 = self.p3_smooth(p3)
@@ -162,7 +240,7 @@ class AnchorPoints(nn.Module):
     Generate grid-based anchor points for regression.
     Simplified with clearer parameters and improved memory efficiency.
     """
-    def __init__(self, pyramid_levels=[3], strides=None, row=2, line=2):
+    def __init__(self, pyramid_levels=[4], strides=None, row=2, line=2):  # 3 for VGG16
         super(AnchorPoints, self).__init__()
         
         self.pyramid_levels = pyramid_levels
@@ -242,7 +320,9 @@ class ModernPointNet(nn.Module):
         # Feature extraction and fusion
         self.backbone = FeatureExtractor(pretrained=True)
         # Changed channel configuration to match VGG16 feature maps
-        self.fpn = FeaturePyramidNetwork([64, 256, 512, 512], feature_size)
+        # self.fpn = FeaturePyramidNetwork([64, 256, 512, 512], feature_size)
+        # Update FPN channels to match ResNet-50 outputs: [256, 512, 1024, 2048]
+        self.fpn = FeaturePyramidNetwork([256, 512, 1024, 2048], feature_size)
         
         # Number of anchor points per grid cell
         self.point_count = row * line
@@ -252,7 +332,7 @@ class ModernPointNet(nn.Module):
         self.class_head = ClassificationHead(feature_size, self.point_count, num_classes + 1, feature_size)
         
         # Generate anchor points
-        self.anchor_points = AnchorPoints(pyramid_levels=[3], row=row, line=line)
+        self.anchor_points = AnchorPoints(pyramid_levels=[4], row=row, line=line)  # 3 for VGG16
         
         # Optional attention mechanism for better feature focus
         self.attention = SpatialAttention(feature_size)
